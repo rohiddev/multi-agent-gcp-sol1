@@ -7,12 +7,12 @@ Retrieval abstraction layer — three options:
 Set RETRIEVAL_BACKEND in .env to switch: agent_search | rag_engine | vector_search
 """
 
-import os
 import logging
+from config import RETRIEVAL_BACKEND
 
 logger = logging.getLogger(__name__)
 
-BACKEND = os.getenv("RETRIEVAL_BACKEND", "agent_search")
+BACKEND = RETRIEVAL_BACKEND
 
 
 def retrieve(query: str, top_k: int = 5) -> list[dict]:

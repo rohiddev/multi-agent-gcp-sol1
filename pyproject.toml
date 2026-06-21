@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "enterprise-multi-agent"
+version = "0.1.0"
+description = "Enterprise multi-agent template using Google ADK and Gemini Enterprise Agent Platform"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.8.0",
+    "google-cloud-aiplatform>=1.60.0",
+    "google-cloud-logging>=3.10.0",
+    "google-cloud-trace>=1.13.0",
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-gcp-trace>=1.6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

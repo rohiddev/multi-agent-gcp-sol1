@@ -36,12 +36,12 @@ Security
 ## Quickstart
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies (Python 3.11+ required)
 pip install -r requirements.txt
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your project ID, model, and retrieval settings
+# Edit .env — at minimum set GOOGLE_CLOUD_PROJECT
 
 # 3. Authenticate
 gcloud auth application-default login
@@ -56,9 +56,11 @@ python main.py
 
 ```
 multi_agent_gcp_sol1/
-├── main.py                      # Entry point — wires everything together
-├── config.py                    # Config from environment variables
+├── main.py                      # Entry point — startup validation, wires everything together
+├── agent.py                     # ADK CLI entry point (adk run / adk web)
+├── config.py                    # Centralized config with fail-fast validation
 ├── requirements.txt
+├── pyproject.toml               # Python version pin (>=3.11), dev dependencies
 ├── .env.example
 ├── agents/
 │   ├── supervisor.py            # Supervisor — routes to specialist agents
@@ -68,11 +70,11 @@ multi_agent_gcp_sol1/
 ├── retrieval/
 │   └── retrieval.py             # Abstraction: Agent Search | RAG Engine | Vector Search
 ├── tools/
-│   └── enterprise_tools.py      # Tool definitions (plain Python functions)
+│   └── enterprise_tools.py      # All tool definitions — error-handled, consistent return schema
 ├── observability/
-│   └── telemetry.py             # Cloud Trace + Cloud Logging via OpenTelemetry
+│   └── telemetry.py             # Idempotent Cloud Trace + Cloud Logging via OpenTelemetry
 └── security/
-    └── iam.py                   # IAM patterns + production security checklist
+    └── iam.py                   # IAM credential validation, called at startup
 ```
 
 ---
@@ -88,15 +90,33 @@ Set `RETRIEVAL_BACKEND` in `.env`:
 | `vector_search` | Vector Search — custom chunking and ranking |
 
 Replace the stub implementations in `retrieval/retrieval.py` with real API calls.
+An invalid value will raise an `EnvironmentError` at startup.
 
 ---
 
 ## Adding a New Agent
 
 1. Create `agents/my_agent.py` following the pattern in `rag_agent.py`
-2. Add your tools to `tools/enterprise_tools.py`
-3. Import and add to `supervisor.py` `sub_agents=` list
-4. Update supervisor instructions to describe when to route to it
+2. Add your tools to `tools/enterprise_tools.py` — follow the error-handling convention
+3. Export your tool from `tools/__init__.py`
+4. Import and add to `supervisor.py` `sub_agents=` list
+5. Update supervisor instructions to describe when to route to it
+
+---
+
+## Tool Error Handling Convention
+
+All tools return a dict with a `"status"` key:
+
+```python
+# Success
+{"status": "success", ...}
+
+# Failure — never raises, always returns structured error
+{"status": "error", "message": "..."}
+```
+
+Agents check `status` before proceeding. This prevents a single tool failure from crashing the session.
 
 ---
 
