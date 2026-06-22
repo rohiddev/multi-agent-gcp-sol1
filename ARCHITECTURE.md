@@ -389,3 +389,179 @@ Here is what happens from the moment you type a request to the moment you get an
 | **ADC** | Application Default Credentials — how code authenticates to Google Cloud automatically |
 | **CMEK** | Customer-Managed Encryption Keys — you control the encryption key for your data |
 | **VPC Service Controls** | A GCP security perimeter that prevents data from leaving your defined boundary |
+
+---
+
+## Key Design Decisions — Interview Guide
+
+This section explains the important architectural choices made in this system and the reasoning
+behind each one. These are the questions you are most likely to face in a technical interview.
+
+---
+
+### 1. Why use Google ADK as the agent framework?
+
+**Decision:** Google ADK orchestrates all agents, even on GCP.
+
+**Why:**
+ADK provides a production-grade agent loop out of the box — session management, tool
+calling, streaming responses, sub-agent delegation, and a built-in web UI for testing.
+Building this from scratch would take weeks. ADK also integrates natively with Vertex AI
+and Gemini, which eliminates authentication boilerplate.
+
+**Interview angle:** "We chose ADK over LangChain or a custom loop because it handles
+the agent lifecycle (sessions, retries, streaming) as infrastructure, not application code.
+That lets the team focus on business logic rather than plumbing."
+
+---
+
+### 2. Why a Supervisor + specialist agent pattern instead of one big agent?
+
+**Decision:** One SupervisorAgent routes to three specialist agents (RAG, Action, Policy).
+
+**Why:**
+A single agent given all responsibilities becomes unreliable — the model tries to do
+everything and does nothing well. Separating concerns means:
+- Each agent has a narrow, well-defined prompt — easier to test and tune
+- Each agent can use a different model (e.g. Gemini Pro for Policy, Flash for RAG)
+- Failures are isolated — a broken Action agent does not affect knowledge retrieval
+- New specialists can be added without touching existing agents
+
+**Interview angle:** "This is the same principle as microservices applied to AI agents —
+separation of concerns, independent deployability, and fault isolation."
+
+---
+
+### 3. Why is PolicyAgent always checked before ActionAgent?
+
+**Decision:** Every write action must pass through PolicyAgent before ActionAgent executes.
+
+**Why:**
+Without a policy gate, the Action agent could create tickets, modify records, or trigger
+workflows for any user regardless of their role. The Policy agent acts as an explicit
+authorization layer — it mirrors how real enterprise systems work (IAM policies, RBAC).
+If the policy check is skipped, the system has no auditability for who was allowed to do what.
+
+**Interview angle:** "We applied the principle of least privilege at the agent level.
+No action executes without an explicit PERMITTED verdict. This creates an audit trail and
+prevents privilege escalation through the AI layer."
+
+---
+
+### 4. Why does the RAG agent never answer from its own knowledge?
+
+**Decision:** RAGAgent is instructed to only use retrieved content — it never answers from
+the model's training data.
+
+**Why:**
+In an enterprise context, the model's general knowledge is a liability, not an asset.
+Company policies, runbooks, and SOPs change frequently. A model answering from training
+data could give confidently wrong answers (e.g. an outdated security policy).
+Grounding every answer in retrieved documents means every claim is traceable to a source.
+
+**Interview angle:** "This is the core guarantee of RAG — not just better answers, but
+auditable answers. Every response can be traced back to a specific document version.
+That is critical for compliance and incident response."
+
+---
+
+### 5. Why three retrieval backend options (Agent Search, RAG Engine, Vector Search)?
+
+**Decision:** The retrieval backend is switchable via a single environment variable.
+
+**Why:**
+Different enterprises are at different stages of maturity. Agent Search is the fastest
+path to production — no infrastructure to manage. RAG Engine adds production-grade
+orchestration. Vector Search gives full control for teams with specific chunking or
+ranking requirements. Locking in one backend would make the template unusable for most
+organisations. The abstraction layer (retrieval.py) means agents never know or care
+which backend is running.
+
+**Interview angle:** "We applied the strategy pattern here — a common interface with
+swappable implementations. This is how you build templates that work across different
+enterprise maturity levels without forcing a rewrite."
+
+---
+
+### 6. Why is setup_telemetry() called once at module level, not inside run()?
+
+**Decision:** Telemetry is initialised once at startup, not per request.
+
+**Why:**
+If called per request, every invocation of run() would register a new TracerProvider
+and a new Cloud Logging handler. After 100 requests, there are 100 handlers writing
+duplicate log entries. In a long-running service (Cloud Run, GKE) this causes memory
+growth and log flooding. Module-level initialisation is idiomatic for any shared
+resource (database connections, logging, tracing).
+
+**Interview angle:** "This is a classic singleton pattern applied to infrastructure
+setup. The rule is: initialise once, use everywhere. The same principle applies to
+database connection pools."
+
+---
+
+### 7. Why does credential validation happen at startup, not on the first request?
+
+**Decision:** get_credentials() (GCP) / get_identity() (AWS) is called at module load time.
+
+**Why:**
+Failing at startup is far better than failing mid-request. If credentials are wrong,
+the service should refuse to start and emit a clear error — not silently start, serve
+a few requests, then crash with a confusing auth error when a real user is waiting.
+This is the "fail fast" principle applied to infrastructure dependencies.
+
+**Interview angle:** "In production systems, you want the health check to fail at boot,
+not at runtime. Early failure surfaces configuration problems in staging before they
+reach production users."
+
+---
+
+### 8. Why does run() raise RuntimeError instead of returning "No response."?
+
+**Decision:** If no final response event arrives, the function raises an exception.
+
+**Why:**
+Returning a silent fallback string like "No response." hides failures. The caller has
+no way to distinguish between a real agent response and a failure. Raising an exception
+forces the caller to handle the failure explicitly — log it, retry it, or surface it to
+the user with a proper error message. Silent failures are the hardest bugs to diagnose
+in production.
+
+**Interview angle:** "This follows the principle of making errors visible. A string that
+looks like a normal response but isn't is a silent failure — the worst kind in a
+distributed system."
+
+---
+
+### 9. Why are user_id and session_id generated with UUID instead of hardcoded?
+
+**Decision:** run() generates random user_id and session_id per call if not provided.
+
+**Why:**
+The original code had USER_ID = "user-001" — a hardcoded constant. In a real system,
+every user and every session must be distinct. Hardcoded IDs mean all requests share
+the same session state, which causes context bleed between users. UUID generation is
+the minimum viable approach for correctness; in production these would come from the
+authenticated user's identity token.
+
+**Interview angle:** "Session isolation is a fundamental correctness requirement for
+any multi-user system. Hardcoded session IDs are a correctness bug, not just a
+design smell."
+
+---
+
+### 10. Why are all tools wrapped in try/except with structured return values?
+
+**Decision:** Every tool returns {"status": "success"|"error"|"blocked"} and never raises.
+
+**Why:**
+If a tool raises an uncaught exception, the ADK agent loop crashes and the user gets
+nothing. By catching all exceptions and returning a structured error dict, the agent
+can decide what to do — retry, apologise to the user, or escalate. This is the same
+principle as HTTP status codes: a structured signal is always better than an unhandled
+exception. It also makes tool behaviour testable — you can assert on the returned dict
+without mocking exception flows.
+
+**Interview angle:** "Tools are the boundary between the AI layer and real systems.
+Boundaries must be hardened. The agent should always receive a signal it can reason
+about, never a raw exception."
